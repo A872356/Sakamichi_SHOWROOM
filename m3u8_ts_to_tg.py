@@ -23,6 +23,7 @@ class M3U8TSToTG:
         telegram_chat_id,
         caption_prefix="",
         work_dir=".",
+        merge_group_size=15,
     ):
         """
         Initialize M3U8TSToTG.
@@ -38,10 +39,10 @@ class M3U8TSToTG:
         self.telegram_chat_id = telegram_chat_id
         self.caption_prefix = caption_prefix
         self.work_dir = work_dir
+        self.merge_group_size = merge_group_size
 
         # Constants
         self.sent_json_file = os.path.join(work_dir, "sent.json")
-        self.merge_group_size = 5
         self.check_interval = 5  # seconds between M3U8 polls
         self.merge_idle_limit = 30  # seconds since last modification before merging
 
@@ -265,7 +266,7 @@ class M3U8TSToTG:
                     to_send_caption = (
                         file_path
                         if not self.caption_prefix
-                        else f"{self.caption_prefix}_{file_path}"
+                        else f"{self.caption_prefix}_{file_path.replace(self.work_dir + '/', '')}"
                     )
                     response = requests.post(
                         url,
