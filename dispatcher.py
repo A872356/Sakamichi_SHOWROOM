@@ -1,119 +1,143 @@
 import os
-import requests
-import json
-from datetime import datetime, timedelta
-import pytz
-from telegram import send_telegram_message, send_telegram_file
 import time
+import json
+from datetime import datetime
+import pytz
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-TARGET_REPO = os.getenv("TARGET_REPO")
+# Third-party libraries
+import requests
+import yt_dlp
 
-API_URL = f"https://api.github.com/repos/{TARGET_REPO}/dispatches"
+# Local modules
+from discord_notifier import send_notification
 
+# --- Constants ---
 
-def check_day_relation_jst(timestamp: int) -> str:
+JST = pytz.timezone("Asia/Tokyo")
+ROOM_BASE_URL = "https://public-api.showroom-cdn.com/room/"
 
-    jst = pytz.timezone("Asia/Tokyo")
+# --- Initial Setup ---
 
-    target_date = datetime.fromtimestamp(timestamp, jst).date()
+try:
+    with open("data.json", "r", encoding="utf-8") as f:
+        data = json.load(f)
+    print("Loaded data.json configuration.")
+except FileNotFoundError:
+    print("ERROR: data.json not found. Exiting.")
+    exit()
 
-    today_date = datetime.now(jst).date()
+# List to store the status of monitored rooms
+monitored_rooms_status = []
 
-    if target_date == today_date:
-        return "today"
-    else:
-        return "future"
-
-
-with open("data.json", "r") as f:
-    data = json.load(f)
-    print(data)
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = data["channel_id"]
-jst = pytz.timezone("Asia/Tokyo")
-# https://campaign.showroom-live.com/nogizaka46_sr/data/rooms.json
-# https://public-api.showroom-cdn.com/room/46_sugawarasatsuki
-
-schedule_today = []
-schedule_future = []
-
-# "id":
-# "name":
-# "url_key":
-# "image_url":
-# "description":
-# "follower_num":
-# "is_live":
-# "is_party":
-# "next_live_schedule":
-
+# --- Initial Status Check ---
 
 for room_link in data["room_link_n"] + data["room_link_s"] + data["room_link_h"]:
     try:
-        print(room_link)
-        room_link = f"https://public-api.showroom-cdn.com/room/{room_link}"
-        print(f"checking room_link: {room_link}")
-        result = requests.get(room_link).json()
-        result["download_dispatched"] = False
-        if "nekojita" in room_link and "乃木坂" not in result["name"]:
+        print(f"Checking initial status for room ID: {room_link}") 
+        room_link = f"{ROOM_BASE_URL}{room_link}"
+
+        result = requests.get(room_link, timeout=10).json()
+
+        # Initialize status flags
+        result["notification_dispatched"] = False
+        result["is_currently_live"] = result.get("is_live", False) 
+        
+        # Custom filtering logic
+        if "nekojita" in room_link and "乃木坂" not in result.get("name", ""):
+            print(f"Skipping non-Nogizaka Neojita room: {result.get('name', 'Unknown')}")
             continue
-        if result["is_live"]:
-            result["next_live_schedule"] = int(time.time())
-            schedule_today.append(result)
-        if result["next_live_schedule"]:
-            if check_day_relation_jst(result["next_live_schedule"]) == "today":
-                schedule_today.append(result)
-            else:
-                schedule_future.append(result)
+
+        monitored_rooms_status.append(result)
+        
+    except requests.exceptions.RequestException as e:
+        print(f"Request Error during initial check for room {room_link}: {e}")
     except Exception as e:
-        print(e)
+        print(f"Error during initial check for room {room_link}: {e}")
 
-print("today", schedule_today)
-print("future", schedule_future)
+# --- Continuous Monitoring Loop ---
 
-for room in schedule_today + schedule_future:
-    timestamp = room["next_live_schedule"]
-    time_str = datetime.fromtimestamp(timestamp, tz=jst).strftime("%Y-%m-%d %H:%M")
-    send_telegram_message(
-        TELEGRAM_BOT_TOKEN,
-        TELEGRAM_CHAT_ID,
-        f"{room['name']}\n{time_str}",
-    )
-
-
-def dispatch_download(url_key):
-    payload = {
-        "event_type": "trigger-download",
-        "client_payload": {"url_key": str(url_key)},
-    }
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    response = requests.post(API_URL, json=payload, headers=headers)
-    print(f"[DISPATCH] {url_key} - Status:", response.status_code)
-
-
-print("Monitoring")
+print("Start continuous monitoring loop.") 
 
 while True:
-    now = datetime.now(jst)
-    all_dispatched = True
-    for room in schedule_today:
-        if room["download_dispatched"]:
-            continue
-        target_time = datetime.fromtimestamp(
-            room["next_live_schedule"], jst
-        ) - timedelta(minutes=15)
-        if now >= target_time:
-            dispatch_download(room["url_key"])
-            room["download_dispatched"] = True
-        else:
-            all_dispatched = False
-    if all_dispatched:
-        print("all dispatched")
-        break
-    time.sleep(10)
+    now = datetime.now(JST)
+    
+    for room in monitored_rooms_status:
+        try:
+            # Get the URL Key (string ID)
+            room_url_key = room.get("url_key") or room.get("room_id") 
+            if not room_url_key:
+                print(f"ERROR: Could not find valid URL Key for room ID {room.get('id', 'N/A')}. Skipping.")
+                continue
+
+            # Fetch the latest live status
+            room_info_url = f"{ROOM_BASE_URL}{room_url_key}"
+            
+            response_status = requests.get(room_info_url, timeout=10)
+            response_status.raise_for_status() 
+            current_status = response_status.json()
+
+            # Filter API errors
+            if current_status.get("Code") == 404:
+                print(f"ERROR: URL Key {room_url_key} is invalid or closed (API Code 404 JSON). Skipping this check.")
+                continue
+                
+            is_live = current_status.get("is_live", False)
+            member_name = current_status.get("name", "Unknown Member")
+            is_notified = room["notification_dispatched"]
+            
+            # --- Core Logic: Detect Live and Dispatch Notification ---
+            if is_live and not is_notified:
+                current_time = datetime.now(JST)
+                timestamp = current_time.strftime("[%Y/%m/%d %H:%M:%S]")
+
+                print(f"[{timestamp}] {member_name} is LIVE! Attempting to send Discord notification.") 
+                
+                # Fallback URL if yt-dlp fails
+                m3u8_url = "M3U8 URL Fetch Failed. (Reason: yt-dlp Error)" 
+                
+                try:
+                    full_url = f"https://www.showroom-live.com/{room_url_key}" 
+                    
+                    ydl_opts = {
+                        'format': 'best',
+                        'quiet': True,
+                        'no_warnings': True,
+                        'simulate': True,
+                    }
+                    
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        # Extract info without downloading
+                        info = ydl.extract_info(full_url, download=False)
+                        m3u8_url = info.get('url', "M3U8 URL Not Available")
+                        
+                        if m3u8_url == "M3U8 URL Not Available":
+                             raise ValueError("yt-dlp ran successfully but no stream URL was found.")
+                             
+                    print(f"DEBUG: M3U8 URL successfully retrieved via yt-dlp.")
+                    
+                except Exception as e:
+                    print(f"WARNING: Failed to fetch M3U8 URL for {member_name}: {e}")
+                
+                # Call Discord notification function (sends two separate messages)
+                send_notification(member_name, room_url_key, m3u8_url)
+                
+                # Update status flags
+                room["notification_dispatched"] = True
+                room["is_currently_live"] = True
+            
+            # Reset status when stream ends
+            elif not is_live and is_notified:
+                room["notification_dispatched"] = False
+                room["is_currently_live"] = False
+
+                current_time = datetime.now(JST)
+                timestamp = current_time.strftime("[%Y/%m/%d %H:%M:%S]")
+                print(f"[{timestamp}] {member_name} stream ends.")
+                
+        except requests.exceptions.RequestException as req_e:
+            print(f"Request Error for room {room_url_key}: {req_e}")
+        except Exception as e:
+            print(f"An unexpected error occurred for room {room_url_key}: {e}")
+
+    # Sleep for 10 seconds before the next loop iteration
+    time.sleep(15)
