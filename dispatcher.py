@@ -3,6 +3,8 @@ import time
 import json
 from datetime import datetime
 import pytz
+from dotenv import load_dotenv
+load_dotenv()
 
 # Third-party libraries
 import requests
@@ -90,7 +92,7 @@ while True:
                 current_time = datetime.now(JST)
                 timestamp = current_time.strftime("[%Y/%m/%d %H:%M:%S]")
 
-                print(f"[{timestamp}] {member_name} is LIVE! Attempting to send Discord notification.") 
+                print(f"{timestamp} {member_name} is LIVE! Attempting to send Discord notification.") 
                 
                 # Fallback URL if yt-dlp fails
                 m3u8_url = "M3U8 URL Fetch Failed. (Reason: yt-dlp Error)" 
@@ -112,8 +114,6 @@ while True:
                         
                         if m3u8_url == "M3U8 URL Not Available":
                              raise ValueError("yt-dlp ran successfully but no stream URL was found.")
-                             
-                    print(f"DEBUG: M3U8 URL successfully retrieved via yt-dlp.")
                     
                 except Exception as e:
                     print(f"WARNING: Failed to fetch M3U8 URL for {member_name}: {e}")
@@ -132,7 +132,7 @@ while True:
 
                 current_time = datetime.now(JST)
                 timestamp = current_time.strftime("[%Y/%m/%d %H:%M:%S]")
-                print(f"[{timestamp}] {member_name} stream ends.")
+                print(f"{timestamp} {member_name} stream ends.")
                 
         except requests.exceptions.RequestException as req_e:
             print(f"Request Error for room {room_url_key}: {req_e}")
